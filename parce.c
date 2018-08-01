@@ -27,7 +27,7 @@ void parce_data(char *buffer, int *i, char *value){
 char parce_get_action(char *buffer){
 	/* Dado el buffer retorna la accion a realizar. El mismo
 	   es el char en la posicion 2 */
-	return buffer[2];
+	return buffer[4];
 }
 void parce_get_taskid(char *buffer, char *value){
 	/* Dado un buffer, retorna el taskid como
@@ -35,4 +35,6 @@ void parce_get_taskid(char *buffer, char *value){
 	   encuentran en la posición 0 a la 1. */
 	value[0] = buffer[0];
 	value[1] = buffer[1];
+	value[2] = buffer[2];
+	value[3] = buffer[3];
 }

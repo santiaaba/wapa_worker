@@ -27,45 +27,91 @@ int add_site(char *buffer_rx){
 
 	char user_id[100];
 	char sus_id[100];
+	char site_id[5];	//El 5to es el '\0'
+	char site_ver[3];	//El 3ro es el '\0'
 	char site_name[100];
 	char default_domain[100];
 	char alias[200];
 	FILE *fd;
 	char site_path[100];
 
-	int pos = 3;
+	int pos = 5;
 	parce_data(buffer_rx,&pos,&user_id[0]);
 	parce_data(buffer_rx,&pos,&sus_id[0]);
 	parce_data(buffer_rx,&pos,&site_name[0]);
+	parce_data(buffer_rx,&pos,&site_id[0]);
+	parce_data(buffer_rx,&pos,&site_ver[0]);
 	parce_data(buffer_rx,&pos,&default_domain[0]);
 	parce_data(buffer_rx,&pos,&alias[0]);
 
 	printf("Datos del sitio a ser agregado:\n");
-	printf("	user_id:	%s\n",&user_id);
-	printf("	sus_id:		%s\n",&sus_id);
-	printf("	site_name:	%s\n",&site_name);
-	printf("	default_domain:	%s\n",&default_domain);
-	printf("	alias:		%s\n",&alias);
+	printf("	site_id:	%lu\n",site_id);
+	printf("	site_ver	%u\n",site_ver);
+	printf("	user_id:	%lu\n",user_id);
+	printf("	sus_id:		%lu\n",sus_id);
+	printf("	site_name:	%s\n",site_name);
+	printf("	default_domain:	%s\n",default_domain);
+	printf("	alias:		%s\n",alias);
 
 	strcpy(site_path,VHOSTDIR);
 	strcat(site_path,site_name);
 	strcat(site_path,".conf");
 
 	fd = fopen(site_path,"w");
+	fprintf(fd,"#ID %lu\n",site_id);
+	fprintf(fd,"#VER %u\n",site_ver);
 	fprintf(fd,"<VirtualHost *:80>\n");
-	fprintf(fd,"	DocumentRoot /websites/%s/%s/%s/wwwroot\n",
+	fprintf(fd,"	DocumentRoot /websites/%lu/%lu/%s/wwwroot\n",
 	user_id,sus_id,site_name);
 	fprintf(fd,"	ServerName %s.%s\n",site_name,default_domain);
 	fprintf(fd,"	ServerAlias %s\n",alias);
-	fprintf(fd,"	CustomLog /websites/%s/%s/%s/logs/access.log combined\n",
+	fprintf(fd,"	CustomLog /websites/%lu/%lu/%s/logs/access.log combined\n",
 	user_id,sus_id,site_name);
-	fprintf(fd,"	ErrorLog /websites/%s/%s/%s/logs/error.log\n",
+	fprintf(fd,"	ErrorLog /websites/%lu/%lu/%s/logs/error.log\n",
 	user_id,sus_id,site_name);
 	fprintf(fd,"");
 	fprintf(fd,"</VirtualHost>\n");
 	fclose(fd);
 
 	return 1;
+}
+
+int get_sites(char *buffer_tx, int *last_site_id){
+	/* Retorna un listado de los id de los sitios que posee
+	   cargados. en la variable last_site_id retorna el
+	   ultimo site_id cargado en el buffer si es que se
+	   supera el tamano del mismo. Si no quedan mas entocnes
+	   se retorna 0 */
+	FILE *fp;
+	char buffer[100];
+	char site_id_char[5]; //el 5to es el '\0'
+	unsigned long site_id;
+
+	fp = popen("cat * | grep ID | awk '{print $2}'", "r");
+	if (fp == NULL) {
+		printf("Failed to run command\n" );
+		return 0;
+	}
+	while (fgets(buffer, sizeof(buffer)-1, fp) != NULL){
+		site_id = strtoul(buffer);
+		/* Si last_site_id es distinto de 0 entonces debemos
+ 		 * avanzar hasta encontrar donde nos quedamos */
+		if(last_site_id != 0){
+			if(last_site_id == site_id){
+				last_site_id = 0;
+			}
+		} else {
+			sprintf(site_id_char,"%lu",site_id);
+			strcat(buffer_tx,site_id_char);
+			if(strsize(buffer_tx) > (BUFFER_SIZE - 4)){
+				last_site_id = site_id;
+				break;
+			}
+		}
+	}
+	pclose(fp);
+	return 1;
+	
 }
 
 void del_site(){
@@ -89,10 +135,15 @@ int main(int argc , char *argv[]){
 	struct sockaddr_in client;
 	char buffer_rx[BUFFER_SIZE];
 	char buffer_tx[BUFFER_SIZE];
-	char taskid[2];
+	unsigned long last_site_id;
+	char taskid[4];
 	char action;
 	int result;
 	int pos;
+	struct timeval tv;
+	
+	tv.tv_sec = 3;
+	tv.tv_usec = 0;
 
 	if ((fd_server=socket(AF_INET, SOCK_STREAM, 0)) == -1 ) {  
 		printf("error en socket()\n");
@@ -102,6 +153,7 @@ int main(int argc , char *argv[]){
 	server.sin_port = htons(PORT);
 	server.sin_addr.s_addr = INADDR_ANY;
 	//bzero(&(server.sin_zero),8);
+	setsockopt(fd_server, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
 	if(bind(fd_server,(struct sockaddr*)&server, sizeof(struct sockaddr))<0) {
 		printf("error en bind() \n");
@@ -134,16 +186,40 @@ int main(int argc , char *argv[]){
 		action = parce_get_action(&buffer_rx[0]);
 		printf("action: %c\n",action);
 
+		strcat(buffer_tx,taskid);
 		switch(action){
 			case 'A':
 				printf("Agregamos sitio\n");
 				if(add_site(&buffer_rx[0])){
-					strcat(buffer_tx,"1");
+					buffer_tx[4] = '1';
 				} else {
-					strcat(buffer_tx,"0");
+					buffer_tx[4] = '0';
 				}
 				send(fd_client,buffer_tx, BUFFER_SIZE,0);
 				break;
+			case 'G':
+				printf("Solicitamos los sitios existentes\n");
+				last_site_id = 0;
+				/* Indicando al cliente que se enviaran los datos*/
+				if(send(fd_client,buffer_tx, BUFFER_SIZE,0)){
+				} else {
+					// El buffer es limitado. Posiblemente
+					// se necesiten varias transmiciones
+					do{
+						/* Esperando que el cliente este listo para recibir los datos */
+						if ((fd_client = accept(fd_server,(struct sockaddr *)&client,&sin_size))<0) {
+							printf("error en accept()\n");
+							return 1;
+						}
+						buffer_tx[4] = '1'; buffer_tx[5] = '\0';
+ 						if(!get_sites(&buffer_tx,&last_site_id)){
+							buffer_tx[4] = '0';
+							last_site_id = 0
+						}
+						send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					} while(last_site_id != 0);
+					break;
+				}
 			case 'D':
 				printf("Implementar\n");
 				break;
