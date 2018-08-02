@@ -136,7 +136,8 @@ int main(int argc , char *argv[]){
 	char buffer_rx[BUFFER_SIZE];
 	char buffer_tx[BUFFER_SIZE];
 	unsigned long last_site_id;
-	char taskid[4];
+	char aux[20];
+	char taskid;
 	char action;
 	int result;
 	int pos;
@@ -179,11 +180,11 @@ int main(int argc , char *argv[]){
 		recv(fd_client,buffer_rx,BUFFER_SIZE,0);
 		printf("Recibimos -%s-\n",buffer_rx);
 		/* Obtenemos el id de tarea. Las tareas en los workers son sincronas */
-		parce_get_taskid(&buffer_rx[0], &taskid[0]);
-		printf("taskid: %lu\n",taskid);
+		parce_data(buffer_rx,0,aux);
+		task_id = atoi(aux);
 		strcpy(buffer_tx,taskid);
 		/* Obtenemos la accion a realizar */
-		action = parce_get_action(&buffer_rx[0]);
+		action = buffer_rx[5];
 		printf("action: %c\n",action);
 
 		strcat(buffer_tx,taskid);
