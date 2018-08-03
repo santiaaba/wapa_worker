@@ -76,51 +76,110 @@ int add_site(char *buffer_rx){
 	return 1;
 }
 
-int get_sites(char *buffer_tx, int *last_site_id){
+int get_sites(int fd_client){
 	/* Retorna un listado de los id de los sitios que posee
 	   cargados. en la variable last_site_id retorna el
 	   ultimo site_id cargado en el buffer si es que se
 	   supera el tamano del mismo. Si no quedan mas entocnes
 	   se retorna 0 */
 	FILE *fp;
-	char buffer[100];
+	char buffer_tx[BUFFER_SIZE];
+	char buffer[50];
 	char site_id_char[5]; //el 5to es el '\0'
 	unsigned long site_id;
 
-	fp = popen("cat * | grep ID | awk '{print $2}'", "r");
+	printf("Solicitan listado de sitios\n");
+
+	fp = popen("cat /etc/httpd/sites.d/*.conf 2>/dev/null | grep ID | awk '{print $2}'", "r");
 	if (fp == NULL) {
 		printf("Failed to run command\n" );
 		return 0;
 	}
+	buffer_tx[0] = '\0';
 	while (fgets(buffer, sizeof(buffer)-1, fp) != NULL){
-		site_id = strtoul(buffer);
+		printf("Dato a armar %s\n",buffer);
 		/* Si last_site_id es distinto de 0 entonces debemos
  		 * avanzar hasta encontrar donde nos quedamos */
-		if(last_site_id != 0){
-			if(last_site_id == site_id){
-				last_site_id = 0;
-			}
+		if(strlen(buffer_tx)+strlen(buffer)+2 >= BUFFER_SIZE){
+			/*Enviamos lo que tenemos de momento */
+			printf("Estamos en while enviando -%s-\n",buffer_tx);
+			send(fd_client,buffer_tx,BUFFER_SIZE,0);
+			/*Armamos de nuevo el buffer */
+			strcpy(buffer_tx,buffer);strcat(buffer_tx,"|");
+			/*Le avisamos al client que hay mas informacion */
+			send(fd_client,"0\0",BUFFER_SIZE,0);
 		} else {
-			sprintf(site_id_char,"%lu",site_id);
-			strcat(buffer_tx,site_id_char);
-			if(strsize(buffer_tx) > (BUFFER_SIZE - 4)){
-				last_site_id = site_id;
-				break;
-			}
+			/* Seguimos metiendo datos en buffer_tx */
+			strcat(buffer_tx,buffer);strcat(buffer_tx,"|");
 		}
 	}
+	printf("Estamos fin enviando -%s-\n",buffer_tx);
+	send(fd_client,buffer_tx,BUFFER_SIZE,0);
+	sleep (2);
+	printf("Enviamos fin de datos\n");
+	strcpy(buffer_tx,"1");
+	send(fd_client,buffer_tx,BUFFER_SIZE,0);
+	printf("cerramos el pipe\n");
 	pclose(fp);
 	return 1;
-	
 }
 
 void del_site(){
 	/* Elimina la configuracion de un sitio */
 }
 
-int worker_check(){
+int check(char *detalle){
 	/* Retorna si un worker esta en condiciones de
-	   estar online */
+	   estar online y tambien estadisticas del mismo */
+	FILE *fp;
+	char buffer[100];
+	int status = 1;
+
+	/* Verificar que este montado via NFS el filer */
+	/* Verificar que el httpd este corriendo */
+	fp = popen("systemctl status httpd > /dev/null; echo $?", "r");
+	if (fp == NULL) {
+		printf("Fallo al obtener el estado del apache\n" );
+		strcpy(detalle,"No se pudo determinar si el proceso httpd esta corriendo");
+		status = 0;
+	}
+	fgets(buffer, sizeof(buffer)-1, fp);
+	pclose(fp);
+	if(buffer[0] != '0'){
+		printf("Proceso apache caido");
+		strcpy(detalle,"Proceso httpd no esta corriendo");
+		status = 0;
+	}
+}
+
+void statistics(char *aux){
+	/* Obtiene estadisticas del worker */
+	FILE *fp;
+	char buffer[100];
+
+	/* Para la CPU */
+	fp = popen("vmstat | tail -1 | awk '{print \"|\"$14\"|\"$13\"|\"$15\"|\"$16\"|\"}'", "r");
+	fgets(buffer, sizeof(buffer)-1, fp);
+	strcpy(aux,buffer);
+	pclose(fp);
+
+	/* Para la memoria */
+	fp = popen("free | tail -2 | head -1 | awk '{print $2\"|\"$3\"|\"}'", "r");
+	fgets(buffer, sizeof(buffer)-1, fp);
+	strcpy(aux,buffer);
+	pclose(fp);
+
+	/* Para la swap */
+	fp = popen("free | tail -1 | awk '{print $2\"|\"$3}'", "r");
+	fgets(buffer, sizeof(buffer)-1, fp);
+	strcpy(aux,buffer);
+	pclose(fp);
+}
+
+int repare(){
+	/* intenta reparar el worker */
+	/* retorna 1 si tuvo exito. 0 en caso contrario */
+	return 1;
 }
 
 /********************************
@@ -135,9 +194,8 @@ int main(int argc , char *argv[]){
 	struct sockaddr_in client;
 	char buffer_rx[BUFFER_SIZE];
 	char buffer_tx[BUFFER_SIZE];
-	unsigned long last_site_id;
-	char aux[20];
-	char taskid;
+	unsigned int last_site_id;
+	char aux[200];
 	char action;
 	int result;
 	int pos;
@@ -154,7 +212,7 @@ int main(int argc , char *argv[]){
 	server.sin_port = htons(PORT);
 	server.sin_addr.s_addr = INADDR_ANY;
 	//bzero(&(server.sin_zero),8);
-	setsockopt(fd_server, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+	//setsockopt(fd_server, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
 	if(bind(fd_server,(struct sockaddr*)&server, sizeof(struct sockaddr))<0) {
 		printf("error en bind() \n");
@@ -173,62 +231,43 @@ int main(int argc , char *argv[]){
 			printf("error en accept()\n");
 			return 1;
 		}
-		printf("PASO\n");
-		//printf("Se obtuvo una conexión desde %s\n", inet_ntoa(client.sin_addr) );
 		clear_buffer(buffer_rx);
-		printf("PASO2\n");
 		recv(fd_client,buffer_rx,BUFFER_SIZE,0);
 		printf("Recibimos -%s-\n",buffer_rx);
-		/* Obtenemos el id de tarea. Las tareas en los workers son sincronas */
-		parce_data(buffer_rx,0,aux);
-		task_id = atoi(aux);
-		strcpy(buffer_tx,taskid);
 		/* Obtenemos la accion a realizar */
-		action = buffer_rx[5];
-		printf("action: %c\n",action);
-
-		strcat(buffer_tx,taskid);
+		action = buffer_rx[0];
 		switch(action){
 			case 'A':
 				printf("Agregamos sitio\n");
-				if(add_site(&buffer_rx[0])){
-					buffer_tx[4] = '1';
+				if(add_site(buffer_rx)){
+					buffer_tx[0] = '1';
 				} else {
-					buffer_tx[4] = '0';
+					buffer_tx[0] = '0';
 				}
 				send(fd_client,buffer_tx, BUFFER_SIZE,0);
 				break;
 			case 'G':
-				printf("Solicitamos los sitios existentes\n");
-				last_site_id = 0;
-				/* Indicando al cliente que se enviaran los datos*/
-				if(send(fd_client,buffer_tx, BUFFER_SIZE,0)){
-				} else {
-					// El buffer es limitado. Posiblemente
-					// se necesiten varias transmiciones
-					do{
-						/* Esperando que el cliente este listo para recibir los datos */
-						if ((fd_client = accept(fd_server,(struct sockaddr *)&client,&sin_size))<0) {
-							printf("error en accept()\n");
-							return 1;
-						}
-						buffer_tx[4] = '1'; buffer_tx[5] = '\0';
- 						if(!get_sites(&buffer_tx,&last_site_id)){
-							buffer_tx[4] = '0';
-							last_site_id = 0
-						}
-						send(fd_client,buffer_tx, BUFFER_SIZE,0);
-					} while(last_site_id != 0);
-					break;
-				}
+				get_sites(fd_client);
+				break;
 			case 'D':
 				printf("Implementar\n");
 				break;
 			case 'C':
-				printf("Implementar\n");
+				printf("Chequeamos el worker\n");
+				// retorno = status|cpu sys|cpu usr|cpu idle|cpu wa|ram total|ram used|swap total|swap used|detalle
+				if(check(aux) == 1){
+					buffer_tx[4] = '1';
+				} else {
+					buffer_tx[4] = '0';
+				}
+				buffer_tx[5] = '|'; buffer_tx[6] = '\0';
+				strcat(buffer_tx,aux);
+				statistics(aux);
+				strcat(buffer_tx,aux);
+				
+				send(fd_client,buffer_tx, BUFFER_SIZE,0);
 				break;
 		}
-
 		close(fd_client);
 	}
 }
