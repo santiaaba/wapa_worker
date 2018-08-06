@@ -6,7 +6,7 @@
 #include "parce.h"
 
 #define PORT 3550 /* El puerto que será abierto */
-#define BACKLOG 2 /* El número de conexiones permitidas */
+#define BACKLOG 1 /* El número de conexiones permitidas */
 #define VHOSTDIR "/etc/httpd/sites.d/"
 #define BUFFER_SIZE 1024
 
@@ -95,29 +95,36 @@ int get_sites(int fd_client){
 		printf("Failed to run command\n" );
 		return 0;
 	}
-	buffer_tx[0] = '\0';
+	// Suponemos que vamos a necesitar una sola transmicion
+	strcpy(buffer_tx,"1|0|");
 	while (fgets(buffer, sizeof(buffer)-1, fp) != NULL){
 		printf("Dato a armar %s\n",buffer);
 		/* Si last_site_id es distinto de 0 entonces debemos
  		 * avanzar hasta encontrar donde nos quedamos */
 		if(strlen(buffer_tx)+strlen(buffer)+2 >= BUFFER_SIZE){
-			/*Enviamos lo que tenemos de momento */
+			/* Enviamos lo que tenemos de momento. Como quedan datos
+ 			 * atualizamos el char al inicio */
+			buffer_tx[2] = '1';
 			printf("Estamos en while enviando -%s-\n",buffer_tx);
 			send(fd_client,buffer_tx,BUFFER_SIZE,0);
-			/*Armamos de nuevo el buffer */
-			strcpy(buffer_tx,buffer);strcat(buffer_tx,"|");
-			/*Le avisamos al client que hay mas informacion */
-			send(fd_client,"0\0",BUFFER_SIZE,0);
+			/* Quedamos essperando que el controller acepte mas datos */
+			recv(fd_client,buffer_tx,BUFFER_SIZE,0);
+			if(buffer_tx[0] == 1){
+				/* El controller acepta mas datos */
+				strcpy(buffer_tx,"1|0|");
+			} else {
+				/* Por algun motivo el controller no acepta mas datos */
+				return 0;
+			}
 		} else {
 			/* Seguimos metiendo datos en buffer_tx */
 			strcat(buffer_tx,buffer);strcat(buffer_tx,"|");
 		}
 	}
+	/* Quedaron datos remanentes. Cambiamos el primer char a 0.
+ 	 * para indicar que no hay mas datos */
+	strcpy(buffer_tx,"1|0|");
 	printf("Estamos fin enviando -%s-\n",buffer_tx);
-	send(fd_client,buffer_tx,BUFFER_SIZE,0);
-	sleep (2);
-	printf("Enviamos fin de datos\n");
-	strcpy(buffer_tx,"1");
 	send(fd_client,buffer_tx,BUFFER_SIZE,0);
 	printf("cerramos el pipe\n");
 	pclose(fp);
@@ -140,14 +147,14 @@ int check(char *detalle){
 	fp = popen("systemctl status httpd > /dev/null; echo $?", "r");
 	if (fp == NULL) {
 		printf("Fallo al obtener el estado del apache\n" );
-		strcpy(detalle,"No se pudo determinar si el proceso httpd esta corriendo");
+		strcpy(detalle,"No se pudo determinar si el proceso httpd esta corriendo|");
 		status = 0;
 	}
 	fgets(buffer, sizeof(buffer)-1, fp);
 	pclose(fp);
 	if(buffer[0] != '0'){
-		printf("Proceso apache caido");
-		strcpy(detalle,"Proceso httpd no esta corriendo");
+		printf("Proceso apache caido\n");
+		strcpy(detalle,"httpd caido");
 		status = 0;
 	}
 }
@@ -161,18 +168,21 @@ void statistics(char *aux){
 	fp = popen("vmstat | tail -1 | awk '{print \"|\"$14\"|\"$13\"|\"$15\"|\"$16\"|\"}'", "r");
 	fgets(buffer, sizeof(buffer)-1, fp);
 	strcpy(aux,buffer);
+	aux[strlen(aux) - 1] = '\0';
 	pclose(fp);
 
 	/* Para la memoria */
 	fp = popen("free | tail -2 | head -1 | awk '{print $2\"|\"$3\"|\"}'", "r");
 	fgets(buffer, sizeof(buffer)-1, fp);
-	strcpy(aux,buffer);
+	strcat(aux,buffer);
+	aux[strlen(aux) - 1] = '\0';
 	pclose(fp);
 
 	/* Para la swap */
 	fp = popen("free | tail -1 | awk '{print $2\"|\"$3}'", "r");
 	fgets(buffer, sizeof(buffer)-1, fp);
-	strcpy(aux,buffer);
+	strcat(aux,buffer);
+	aux[strlen(aux) - 1] = '\0';
 	pclose(fp);
 }
 
@@ -190,6 +200,7 @@ int main(int argc , char *argv[]){
 
 	int fd_server, fd_client; /* los ficheros descriptores */
 	int sin_size;
+	int cant_bytes;
 	struct sockaddr_in server;
 	struct sockaddr_in client;
 	char buffer_rx[BUFFER_SIZE];
@@ -226,47 +237,56 @@ int main(int argc , char *argv[]){
 	sin_size=sizeof(struct sockaddr_in);
 
 	while(1){
-		printf("Esperando mensaje desde el cliente()\n");
+		printf("Esperando conneccion desde el cliente()\n"); //Debemos mantener viva la conexion
 		if ((fd_client = accept(fd_server,(struct sockaddr *)&client,&sin_size))<0) {
 			printf("error en accept()\n");
 			return 1;
 		}
+
+		// Aguardamos continuamente que el cliente envie un comando
 		clear_buffer(buffer_rx);
-		recv(fd_client,buffer_rx,BUFFER_SIZE,0);
-		printf("Recibimos -%s-\n",buffer_rx);
-		/* Obtenemos la accion a realizar */
-		action = buffer_rx[0];
-		switch(action){
-			case 'A':
-				printf("Agregamos sitio\n");
-				if(add_site(buffer_rx)){
-					buffer_tx[0] = '1';
-				} else {
-					buffer_tx[0] = '0';
-				}
-				send(fd_client,buffer_tx, BUFFER_SIZE,0);
-				break;
-			case 'G':
-				get_sites(fd_client);
-				break;
-			case 'D':
-				printf("Implementar\n");
-				break;
-			case 'C':
-				printf("Chequeamos el worker\n");
-				// retorno = status|cpu sys|cpu usr|cpu idle|cpu wa|ram total|ram used|swap total|swap used|detalle
-				if(check(aux) == 1){
-					buffer_tx[4] = '1';
-				} else {
-					buffer_tx[4] = '0';
-				}
-				buffer_tx[5] = '|'; buffer_tx[6] = '\0';
-				strcat(buffer_tx,aux);
-				statistics(aux);
-				strcat(buffer_tx,aux);
-				
-				send(fd_client,buffer_tx, BUFFER_SIZE,0);
-				break;
+		while(recv(fd_client,buffer_rx,BUFFER_SIZE,0)>0){
+			printf("Recibimos -%s-\n",buffer_rx);
+			/* Obtenemos la accion a realizar */
+			action = buffer_rx[0];
+			switch(action){
+				case 'A':
+					printf("Agregamos sitio\n");
+					if(add_site(buffer_rx)){
+						buffer_tx[0] = '1';
+					} else {
+						buffer_tx[0] = '0';
+					}
+					printf("Enviamos -%s-\n",buffer_tx);
+					write(fd_client,buffer_tx, BUFFER_SIZE);
+					break;
+				case 'G':
+					get_sites(fd_client);
+					break;
+				case 'D':
+					printf("Implementar\n");
+					break;
+				case 'C':
+					printf("Chequeamos el worker\n");
+					if(check(aux) == 1){
+						buffer_tx[0] = '1';
+					} else {
+						buffer_tx[0] = '0';
+					}
+					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
+					strcat(buffer_tx,aux);
+					statistics(aux);
+					strcat(buffer_tx,aux);
+					
+					printf("Esperando que el cliente reciba los datos\n");
+					cant_bytes = send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					printf("Enviamos(%i) -%s-\n",cant_bytes,buffer_tx);
+					break;
+				default :
+					printf("Error protocolo\n");
+					send(fd_client,"0\0",BUFFER_SIZE,0);
+			}
+			printf("Volvemos a esperar un mesane\n");
 		}
 		close(fd_client);
 	}
