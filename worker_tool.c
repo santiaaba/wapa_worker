@@ -144,6 +144,7 @@ int check(char *detalle){
 
 	/* Verificar que este montado via NFS el filer */
 	/* Verificar que el httpd este corriendo */
+	strcpy(detalle,"todo OK"); // De entrada esta todo bien
 	fp = popen("systemctl status httpd > /dev/null; echo $?", "r");
 	if (fp == NULL) {
 		printf("Fallo al obtener el estado del apache\n" );
@@ -152,11 +153,14 @@ int check(char *detalle){
 	}
 	fgets(buffer, sizeof(buffer)-1, fp);
 	pclose(fp);
+
+	printf("Estado del apache %c\n",buffer[0]);
 	if(buffer[0] != '0'){
 		printf("Proceso apache caido\n");
 		strcpy(detalle,"httpd caido");
 		status = 0;
 	}
+	return status;
 }
 
 void statistics(char *aux){
