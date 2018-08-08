@@ -21,7 +21,7 @@ void clear_buffer(char *buffer_rx){
 	}
 }
 
-int add_site(char *buffer_rx){
+int add_site(char *buffer_rx, int fd_client){
 	/* Agrega el archivo de configuracion de un sitio
 	   al directorio /etc/httpd/sites.d */
 
@@ -35,39 +35,55 @@ int add_site(char *buffer_rx){
 	FILE *fd;
 	char site_path[100];
 
-	int pos = 5;
-	parce_data(buffer_rx,&pos,&user_id[0]);
-	parce_data(buffer_rx,&pos,&sus_id[0]);
-	parce_data(buffer_rx,&pos,&site_name[0]);
-	parce_data(buffer_rx,&pos,&site_id[0]);
-	parce_data(buffer_rx,&pos,&site_ver[0]);
-	parce_data(buffer_rx,&pos,&default_domain[0]);
-	parce_data(buffer_rx,&pos,&alias[0]);
+	int pos = 2;
+	parce_data(buffer_rx,&pos,site_name);
+	parce_data(buffer_rx,&pos,site_id);
+	parce_data(buffer_rx,&pos,site_ver);
+	parce_data(buffer_rx,&pos,user_id);
+	parce_data(buffer_rx,&pos,sus_id);
+	parce_data(buffer_rx,&pos,default_domain);
+	parce_data(buffer_rx,&pos,alias);
 
 	printf("Datos del sitio a ser agregado:\n");
-	printf("	site_id:	%lu\n",site_id);
-	printf("	site_ver	%u\n",site_ver);
-	printf("	user_id:	%lu\n",user_id);
-	printf("	sus_id:		%lu\n",sus_id);
+	printf("	site_id:	%s\n",site_id);
+	printf("	site_ver	%s\n",site_ver);
+	printf("	user_id:	%s\n",user_id);
+	printf("	sus_id:		%s\n",sus_id);
 	printf("	site_name:	%s\n",site_name);
 	printf("	default_domain:	%s\n",default_domain);
-	printf("	alias:		%s\n",alias);
 
+	// Comenzamos a armar el archivo del vhost
 	strcpy(site_path,VHOSTDIR);
 	strcat(site_path,site_name);
 	strcat(site_path,".conf");
 
 	fd = fopen(site_path,"w");
-	fprintf(fd,"#ID %lu\n",site_id);
-	fprintf(fd,"#VER %u\n",site_ver);
+	fprintf(fd,"#ID %s\n",site_id);
+	fprintf(fd,"#VER %s\n",site_ver);
 	fprintf(fd,"<VirtualHost *:80>\n");
-	fprintf(fd,"	DocumentRoot /websites/%lu/%lu/%s/wwwroot\n",
+	fprintf(fd,"	DocumentRoot /websites/%s/%s/%s/wwwroot\n",
 	user_id,sus_id,site_name);
 	fprintf(fd,"	ServerName %s.%s\n",site_name,default_domain);
-	fprintf(fd,"	ServerAlias %s\n",alias);
-	fprintf(fd,"	CustomLog /websites/%lu/%lu/%s/logs/access.log combined\n",
+
+	printf("Preparado para los alias\n");
+	do{
+		// Solicitamos los alias
+		send(fd_client,"1",BUFFER_SIZE,0);
+		recv(fd_client,buffer_rx,BUFFER_SIZE,0);
+		printf("recibimos alias -%s-\n",buffer_rx);
+		pos=2;
+		while(pos < strlen(buffer_rx)){
+			parce_data(buffer_rx,&pos,alias);
+			printf("Agregamos alias al archivo: %s\n",alias);
+			fprintf(fd,"	ServerAlias %s\n",alias);
+		}
+	} while(buffer_rx[0] =='1');
+	// Indicamos que hemos recibido el fin d e los datos
+	send(fd_client,"1",BUFFER_SIZE,0);
+
+	fprintf(fd,"	CustomLog /websites/%s/%s/%s/logs/access.log combined\n",
 	user_id,sus_id,site_name);
-	fprintf(fd,"	ErrorLog /websites/%lu/%lu/%s/logs/error.log\n",
+	fprintf(fd,"	ErrorLog /websites/%s/%s/%s/logs/error.log\n",
 	user_id,sus_id,site_name);
 	fprintf(fd,"");
 	fprintf(fd,"</VirtualHost>\n");
@@ -76,15 +92,31 @@ int add_site(char *buffer_rx){
 	return 1;
 }
 
+int purge(int fd_client){
+	/* Elimina todos los archivos de virtual host de los sitios */
+	
+	FILE *fp;
+	char aux[5];
+
+	fp = popen("rm -f /etc/httpd/sites.d/*.conf 2>/dev/null; echo $?", "r");
+	if (fp == NULL) {
+		printf("Failed to run command\n" );
+		return 0;
+	}
+	fgets(aux, sizeof(aux)-1, fp);
+	pclose(fp);
+	send(fd_client,"1\0",BUFFER_SIZE,0);
+	return 1;
+}
+
 int get_sites(int fd_client){
 	/* Retorna un listado de los id de los sitios que posee
-	   cargados. en la variable last_site_id retorna el
-	   ultimo site_id cargado en el buffer si es que se
-	   supera el tamano del mismo. Si no quedan mas entocnes
-	   se retorna 0 */
+	   cargados. El primer dato es un indicador de si a continuacion
+	   se enviaran mas datos. 1 por Si, 0 por no. */
+
 	FILE *fp;
 	char buffer_tx[BUFFER_SIZE];
-	char buffer[50];
+	char aux[50];
 	char site_id_char[5]; //el 5to es el '\0'
 	unsigned long site_id;
 
@@ -97,11 +129,14 @@ int get_sites(int fd_client){
 	}
 	// Suponemos que vamos a necesitar una sola transmicion
 	strcpy(buffer_tx,"1|0|");
-	while (fgets(buffer, sizeof(buffer)-1, fp) != NULL){
-		printf("Dato a armar %s\n",buffer);
+	while (fgets(aux, sizeof(aux)-1, fp) != NULL){
+		/* El ultimo caracter es un enter. Debemos eliminarlo */
+		printf("largo %i\n",strlen(aux));
+		aux[strlen(aux)-1] = '\0';
+		printf("Dato a armar -%s-\n",aux);
 		/* Si last_site_id es distinto de 0 entonces debemos
  		 * avanzar hasta encontrar donde nos quedamos */
-		if(strlen(buffer_tx)+strlen(buffer)+2 >= BUFFER_SIZE){
+		if(strlen(buffer_tx)+strlen(aux)+2 >= BUFFER_SIZE){
 			/* Enviamos lo que tenemos de momento. Como quedan datos
  			 * atualizamos el char al inicio */
 			buffer_tx[2] = '1';
@@ -118,12 +153,12 @@ int get_sites(int fd_client){
 			}
 		} else {
 			/* Seguimos metiendo datos en buffer_tx */
-			strcat(buffer_tx,buffer);strcat(buffer_tx,"|");
+			printf("Agregamos al final del buffer_Tx\n");
+			strcat(buffer_tx,aux);strcat(buffer_tx,"|");
 		}
 	}
 	/* Quedaron datos remanentes. Cambiamos el primer char a 0.
  	 * para indicar que no hay mas datos */
-	strcpy(buffer_tx,"1|0|");
 	printf("Estamos fin enviando -%s-\n",buffer_tx);
 	send(fd_client,buffer_tx,BUFFER_SIZE,0);
 	printf("cerramos el pipe\n");
@@ -256,19 +291,17 @@ int main(int argc , char *argv[]){
 			switch(action){
 				case 'A':
 					printf("Agregamos sitio\n");
-					if(add_site(buffer_rx)){
-						buffer_tx[0] = '1';
-					} else {
-						buffer_tx[0] = '0';
-					}
-					printf("Enviamos -%s-\n",buffer_tx);
-					write(fd_client,buffer_tx, BUFFER_SIZE);
+					add_site(buffer_rx,fd_client);
 					break;
 				case 'G':
 					get_sites(fd_client);
 					break;
 				case 'D':
 					printf("Implementar\n");
+					break;
+				case 'P':
+					printf("Eliminamos configuracion del apache\n");
+					purge(fd_client);
 					break;
 				case 'C':
 					printf("Chequeamos el worker\n");
@@ -290,7 +323,7 @@ int main(int argc , char *argv[]){
 					printf("Error protocolo\n");
 					send(fd_client,"0\0",BUFFER_SIZE,0);
 			}
-			printf("Volvemos a esperar un mesane\n");
+			printf("Volvemos a esperar un mensaje\n");
 		}
 		close(fd_client);
 	}
