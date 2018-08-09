@@ -125,6 +125,7 @@ int get_sites(int fd_client){
 	fp = popen("cat /etc/httpd/sites.d/*.conf 2>/dev/null | grep ID | awk '{print $2}'", "r");
 	if (fp == NULL) {
 		printf("Failed to run command\n" );
+		send(fd_client,"0\0",BUFFER_SIZE,0);
 		return 0;
 	}
 	// Suponemos que vamos a necesitar una sola transmicion
@@ -161,7 +162,6 @@ int get_sites(int fd_client){
  	 * para indicar que no hay mas datos */
 	printf("Estamos fin enviando -%s-\n",buffer_tx);
 	send(fd_client,buffer_tx,BUFFER_SIZE,0);
-	printf("cerramos el pipe\n");
 	pclose(fp);
 	return 1;
 }
@@ -189,9 +189,7 @@ int check(char *detalle){
 	fgets(buffer, sizeof(buffer)-1, fp);
 	pclose(fp);
 
-	printf("Estado del apache %c\n",buffer[0]);
 	if(buffer[0] != '0'){
-		printf("Proceso apache caido\n");
 		strcpy(detalle,"httpd caido");
 		status = 0;
 	}
@@ -204,9 +202,16 @@ void statistics(char *aux){
 	char buffer[100];
 
 	/* Para la CPU */
-	fp = popen("vmstat | tail -1 | awk '{print \"|\"$14\"|\"$13\"|\"$15\"|\"$16\"|\"}'", "r");
+	fp = popen("uptime | awk '{print \"|\"$10\"|\"$11\"|\"$12\"|\"}' | sed 's\\,\\\\g'", "r");
 	fgets(buffer, sizeof(buffer)-1, fp);
 	strcpy(aux,buffer);
+	aux[strlen(aux) - 1] = '\0';
+	pclose(fp);
+
+	/* Para la CPU */
+	fp = popen("vmstat | tail -1 | awk '{print $14\"|\"$13\"|\"$15\"|\"$16\"|\"}'", "r");
+	fgets(buffer, sizeof(buffer)-1, fp);
+	strcat(aux,buffer);
 	aux[strlen(aux) - 1] = '\0';
 	pclose(fp);
 
