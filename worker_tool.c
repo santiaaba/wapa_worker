@@ -21,15 +21,37 @@ void clear_buffer(char *buffer_rx){
 	}
 }
 
+char httpd_systemctl(int action){       //0 stop, 1 start, 2 reload
+	FILE *fp;
+	char status[2];
+
+	switch(action){
+		case 0:
+			fp = popen("systemctl stop httpd 2>/dev/null; echo $?", "r");
+			break;
+		case 1:
+			fp = popen("systemctl start httpd 2>/dev/null; echo $?", "r");
+			break;
+		case 2:
+			fp = popen("systemctl reload httpd 2>/dev/null; echo $?", "r");
+			break;
+		default:
+			pclose(fp);
+			return 0;
+	}
+	fgets(status, sizeof(status)-1, fp);
+	pclose(fp);
+	return atoi(status);
+}
+
 int add_site(char *buffer_rx, int fd_client){
 	/* Agrega el archivo de configuracion de un sitio
 	   al directorio /etc/httpd/sites.d */
 
-	char user_id[100];
-	char sus_id[100];
 	char site_id[5];	//El 5to es el '\0'
 	char site_ver[3];	//El 3ro es el '\0'
 	char site_name[100];
+	char dir[10];
 	char default_domain[100];
 	char alias[200];
 	FILE *fd;
@@ -38,17 +60,13 @@ int add_site(char *buffer_rx, int fd_client){
 	int pos = 2;
 	parce_data(buffer_rx,&pos,site_name);
 	parce_data(buffer_rx,&pos,site_id);
+	parce_data(buffer_rx,&pos,dir);
 	parce_data(buffer_rx,&pos,site_ver);
-	parce_data(buffer_rx,&pos,user_id);
-	parce_data(buffer_rx,&pos,sus_id);
 	parce_data(buffer_rx,&pos,default_domain);
-	parce_data(buffer_rx,&pos,alias);
 
 	printf("Datos del sitio a ser agregado:\n");
 	printf("	site_id:	%s\n",site_id);
 	printf("	site_ver	%s\n",site_ver);
-	printf("	user_id:	%s\n",user_id);
-	printf("	sus_id:		%s\n",sus_id);
 	printf("	site_name:	%s\n",site_name);
 	printf("	default_domain:	%s\n",default_domain);
 
@@ -60,9 +78,13 @@ int add_site(char *buffer_rx, int fd_client){
 	fd = fopen(site_path,"w");
 	fprintf(fd,"#ID %s\n",site_id);
 	fprintf(fd,"#VER %s\n",site_ver);
+	fprintf(fd,"<Directory /websites/%s/%s/wwwroot>\n",dir,site_name);
+	fprintf(fd,"	AllowOverride All\n");
+	fprintf(fd,"	Require all granted\n");
+	fprintf(fd,"</Directory>\n");
 	fprintf(fd,"<VirtualHost *:80>\n");
-	fprintf(fd,"	DocumentRoot /websites/%s/%s/%s/wwwroot\n",
-	user_id,sus_id,site_name);
+	fprintf(fd,"	DocumentRoot /websites/%s/%s/wwwroot\n",
+	dir,site_name);
 	fprintf(fd,"	ServerName %s.%s\n",site_name,default_domain);
 
 	printf("Preparado para los alias\n");
@@ -81,10 +103,10 @@ int add_site(char *buffer_rx, int fd_client){
 	// Indicamos que hemos recibido el fin d e los datos
 	send(fd_client,"1",BUFFER_SIZE,0);
 
-	fprintf(fd,"	CustomLog /websites/%s/%s/%s/logs/access.log combined\n",
-	user_id,sus_id,site_name);
-	fprintf(fd,"	ErrorLog /websites/%s/%s/%s/logs/error.log\n",
-	user_id,sus_id,site_name);
+	fprintf(fd,"	CustomLog /websites/%s/%s/logs/access.log combined\n",
+	dir,site_name);
+	fprintf(fd,"	ErrorLog /websites/%s/%s/logs/error.log\n",
+	dir,site_name);
 	fprintf(fd,"");
 	fprintf(fd,"</VirtualHost>\n");
 	fclose(fd);
@@ -324,6 +346,33 @@ int main(int argc , char *argv[]){
 					cant_bytes = send(fd_client,buffer_tx, BUFFER_SIZE,0);
 					printf("Enviamos(%i) -%s-\n",cant_bytes,buffer_tx);
 					break;
+				case 'S':
+					/* Start apache */
+					if(httpd_systemctl(0) == 0){
+						buffer_tx[0] = 1;
+					} else {
+						buffer_tx[0] = 0;
+					}
+					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
+					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+				case 'K':
+					/* Stop apache */
+					if(httpd_systemctl(1) == 0){
+						buffer_tx[0] = 1;
+					} else {
+						buffer_tx[0] = 0;
+					}
+					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
+					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+				case 'R':
+					/* Reload apache */
+					if(httpd_systemctl(2) == 0){
+						buffer_tx[0] = 1;
+					} else {
+						buffer_tx[0] = 0;
+					}
+					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
+					send(fd_client,buffer_tx, BUFFER_SIZE,0);
 				default :
 					printf("Error protocolo\n");
 					send(fd_client,"0\0",BUFFER_SIZE,0);
