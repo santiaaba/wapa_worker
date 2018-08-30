@@ -36,12 +36,31 @@ char httpd_systemctl(int action){       //0 stop, 1 start, 2 reload
 			fp = popen("systemctl reload httpd 2>/dev/null; echo $?", "r");
 			break;
 		default:
-			pclose(fp);
 			return 0;
 	}
 	fgets(status, sizeof(status)-1, fp);
 	pclose(fp);
 	return atoi(status);
+}
+
+void delete_site(char *buffer_rx, int fd_client){
+	char command[200];
+	char site_name[100];
+	char status[2];
+	FILE *fp;
+	int pos=2;
+
+	parce_data(buffer_rx,&pos,site_name);
+
+	sprintf(command,"rm /etc/httpd/sites.d/%s.conf 2>/dev/null; echo $?",site_name);
+	printf("Ejecutando comando: %s\n",command);
+	fp = popen(command, "r");
+	fgets(status, sizeof(status)-1, fp);
+	pclose(fp);
+	if(status[0] == '0')
+		send(fd_client,"1",BUFFER_SIZE,0);
+	else
+		send(fd_client,"2",BUFFER_SIZE,0);
 }
 
 int add_site(char *buffer_rx, int fd_client){
@@ -320,6 +339,10 @@ int main(int argc , char *argv[]){
 					printf("Agregamos sitio\n");
 					add_site(buffer_rx,fd_client);
 					break;
+				case 'd':
+					printf("Eliminamos sitio\n");
+					delete_site(buffer_rx,fd_client);
+					break;
 				case 'G':
 					get_sites(fd_client);
 					break;
@@ -355,6 +378,7 @@ int main(int argc , char *argv[]){
 					}
 					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
 					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					break;
 				case 'K':
 					/* Stop apache */
 					if(httpd_systemctl(1) == 0){
@@ -364,6 +388,7 @@ int main(int argc , char *argv[]){
 					}
 					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
 					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					break;
 				case 'R':
 					/* Reload apache */
 					if(httpd_systemctl(2) == 0){
@@ -373,6 +398,7 @@ int main(int argc , char *argv[]){
 					}
 					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
 					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					break;
 				default :
 					printf("Error protocolo\n");
 					send(fd_client,"0\0",BUFFER_SIZE,0);
