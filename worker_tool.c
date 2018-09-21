@@ -8,23 +8,100 @@
 #define PORT 3550 /* El puerto que será abierto */
 #define BACKLOG 1 /* El número de conexiones permitidas */
 #define VHOSTDIR "/etc/httpd/sites.d/"
-#define BUFFER_SIZE 1024
+#define ROLE_BUFFER_SIZE 25
+#define ROLE_HEADER_SIZE 8
+
+/********************************
+ *	Estructura		*
+ ********************************/
+struct config{
+	char default_domain[200];
+};
+
 
 /********************************
  *	FUNCIONES		*
  ********************************/
 
-void clear_buffer(char *buffer_rx){
-	int i;
-	for (i=0;i<BUFFER_SIZE;i++){
-		buffer_rx[i] = '\0';
+void int_to_4bytes(uint32_t *i, char *_4bytes){
+	memcpy(_4bytes,i,4);
+}
+
+void _4bytes_to_int(char *_4bytes, uint32_t *i){
+	memcpy(i,_4bytes,4);
+}
+
+int recv_all_message(int fd_client, char **rcv_message, uint32_t *rcv_message_size){
+	/* Coordina la recepcion de mensajes grandes del cliente */
+	/* El encabezado es de 1 char */
+	char buffer[ROLE_BUFFER_SIZE];
+	char printB[ROLE_BUFFER_SIZE+1];
+	int first_message=1;
+	uint32_t parce_size;
+	int c=0;	// Cantidad de bytes recibidos
+
+	// Al menos una vez vamos a ingresar
+	*rcv_message_size=0;
+	 do{
+		printf("Esperamos nuevo mensaje\n");
+		if(recv(fd_client,buffer,ROLE_BUFFER_SIZE,0)<=0){
+			return 0;
+		}
+		if(first_message){
+			first_message=0;
+			_4bytes_to_int(buffer,rcv_message_size);
+			*rcv_message=(char *)realloc(*rcv_message,*rcv_message_size);
+		}
+		_4bytes_to_int(&(buffer[4]),&parce_size);
+		memcpy(*rcv_message+c,&(buffer[ROLE_HEADER_SIZE]),parce_size);
+		c += parce_size;
+	} while(c < *rcv_message_size);
+	printf("RECV Mesanje: %s\n",*rcv_message);
+	return 1;
+}
+
+int send_all_message(int fd_client, char *send_message, uint32_t send_message_size){
+	/* Coordina el envio de los datos aun cuando se necesita
+	 * mas de una transmision */
+
+	char buffer[ROLE_BUFFER_SIZE];
+	char printB[ROLE_BUFFER_SIZE+1];
+	int c=0;	//Cantidad byes enviados
+	uint32_t parce_size;
+
+	printf("Enviaremos al CORE: %i,%s\n",send_message_size, send_message);
+
+	if( send_message[send_message_size-1] != '\0'){
+		printf("cloud_send_receive: ERROR. send_message no termina en \\0\n");
+		return 0;
+	}
+	/* Los 4 primeros bytes del header es el tamano total del mensaje */
+	int_to_4bytes(&send_message_size,buffer);
+
+	while(c < send_message_size){
+		if(send_message_size - c + ROLE_HEADER_SIZE < ROLE_BUFFER_SIZE){
+			/* Entra en un solo buffer */
+			parce_size = send_message_size - c ;
+		} else {
+			/* No entra todo en el buffer */
+			parce_size = ROLE_BUFFER_SIZE - ROLE_HEADER_SIZE;
+		}
+		int_to_4bytes(&parce_size,&(buffer[4]));
+		memcpy(buffer + ROLE_HEADER_SIZE,send_message + c,parce_size);
+		c += parce_size;
+		if(send(fd_client,buffer,ROLE_BUFFER_SIZE,0)<0){
+			printf("ERROR a manejar\n");
+			return 0;
+		}
 	}
 }
 
-char httpd_systemctl(int action){       //0 stop, 1 start, 2 reload
+httpd_systemctl(int action, char **send_message, uint32_t *send_message_size){	//0 stop, 1 start, 2 reload
 	FILE *fp;
 	char status[2];
 
+	*send_message_size=2;
+	*send_message=(char *)realloc(*send_message,*send_message_size);
 	switch(action){
 		case 0:
 			fp = popen("systemctl stop httpd 2>/dev/null; echo $?", "r");
@@ -36,128 +113,146 @@ char httpd_systemctl(int action){       //0 stop, 1 start, 2 reload
 			fp = popen("systemctl reload httpd 2>/dev/null; echo $?", "r");
 			break;
 		default:
-			return 0;
+			strcpy(*send_message,"0");
 	}
 	fgets(status, sizeof(status)-1, fp);
+	sprintf(*send_message,"%s",status);
 	pclose(fp);
-	return atoi(status);
 }
 
-void delete_site(char *buffer_rx, int fd_client){
+void delete_site(char *rcv_message, char **send_message, uint32_t *send_message_size){
 	char command[200];
 	char site_name[100];
 	char status[2];
 	FILE *fp;
 	int pos=2;
 
-	parce_data(buffer_rx,&pos,site_name);
+	parce_data(rcv_message,'|',&pos,site_name);
 
 	sprintf(command,"rm /etc/httpd/sites.d/%s.conf 2>/dev/null; echo $?",site_name);
 	printf("Ejecutando comando: %s\n",command);
 	fp = popen(command, "r");
 	fgets(status, sizeof(status)-1, fp);
 	pclose(fp);
+
+	*send_message_size = 2;
+	*send_message = (char *)realloc(*send_message,*send_message_size);
+	
 	if(status[0] == '0')
-		send(fd_client,"1",BUFFER_SIZE,0);
+		sprintf(*send_message,"1");
 	else
-		send(fd_client,"2",BUFFER_SIZE,0);
+		sprintf(*send_message,"0");
 }
 
-int add_site(char *buffer_rx, int fd_client){
+//int add_site(char *buffer_rx, int fd_client){
+void add_site(char *rcv_message, char **send_message, uint32_t *send_message_size,
+	      struct config *c){
 	/* Agrega el archivo de configuracion de un sitio
 	   al directorio /etc/httpd/sites.d */
 
-	char site_id[5];	//El 5to es el '\0'
-	char site_ver[3];	//El 3ro es el '\0'
+	char site_id[20];	//El 5to es el '\0'
+	char site_ver[20];	//El 3ro es el '\0'
 	char site_name[100];
 	char dir[10];
-	char default_domain[100];
-	char alias[200];
+	char aux[200];
+	char *aux_list = NULL;
+	int aux_list_size;
+	int pos = 2;
+	int posaux;
 	FILE *fd;
 	char site_path[100];
 
-	int pos = 2;
-	parce_data(buffer_rx,&pos,site_name);
-	parce_data(buffer_rx,&pos,site_id);
-	parce_data(buffer_rx,&pos,dir);
-	parce_data(buffer_rx,&pos,site_ver);
-	parce_data(buffer_rx,&pos,default_domain);
+	parce_data(rcv_message,'|',&pos,site_id);
+	parce_data(rcv_message,'|',&pos,site_name);
+	parce_data(rcv_message,'|',&pos,dir);
+	parce_data(rcv_message,'|',&pos,site_ver);
 
 	printf("Datos del sitio a ser agregado:\n");
 	printf("	site_id:	%s\n",site_id);
 	printf("	site_ver	%s\n",site_ver);
 	printf("	site_name:	%s\n",site_name);
-	printf("	default_domain:	%s\n",default_domain);
 
 	// Comenzamos a armar el archivo del vhost
 	strcpy(site_path,VHOSTDIR);
 	strcat(site_path,site_name);
 	strcat(site_path,".conf");
 
-	fd = fopen(site_path,"w");
-	fprintf(fd,"#ID %s\n",site_id);
-	fprintf(fd,"#VER %s\n",site_ver);
-	fprintf(fd,"<Directory /websites/%s/%s/wwwroot>\n",dir,site_name);
-	fprintf(fd,"	AllowOverride All\n");
-	fprintf(fd,"	Require all granted\n");
-	fprintf(fd,"</Directory>\n");
-	fprintf(fd,"<VirtualHost *:80>\n");
-	fprintf(fd,"	DocumentRoot /websites/%s/%s/wwwroot\n",
-	dir,site_name);
-	fprintf(fd,"	ServerName %s.%s\n",site_name,default_domain);
+	*send_message_size = 2;
+	*send_message = (char *)realloc(*send_message,*send_message_size);
 
-	printf("Preparado para los alias\n");
-	do{
-		// Solicitamos los alias
-		send(fd_client,"1",BUFFER_SIZE,0);
-		recv(fd_client,buffer_rx,BUFFER_SIZE,0);
-		printf("recibimos alias -%s-\n",buffer_rx);
-		pos=2;
-		while(pos < strlen(buffer_rx)){
-			parce_data(buffer_rx,&pos,alias);
-			printf("Agregamos alias al archivo: %s\n",alias);
-			fprintf(fd,"	ServerAlias %s\n",alias);
+	if(fd = fopen(site_path,"w")){
+		fprintf(fd,"#ID %s\n",site_id);
+		fprintf(fd,"#VER %s\n",site_ver);
+		fprintf(fd,"<Directory /websites/%s/%s/wwwroot>\n",dir,site_name);
+		fprintf(fd,"	AllowOverride All\n");
+		fprintf(fd,"	Require all granted\n");
+		fprintf(fd,"</Directory>\n");
+		fprintf(fd,"<VirtualHost *:80>\n");
+		fprintf(fd,"	DocumentRoot /websites/%s/%s/wwwroot\n",
+		dir,site_name);
+		fprintf(fd,"	ServerName %s.%s\n",site_name,c->default_domain);
+	
+		printf("Preparado para los alias\n");
+		aux_list = (char *)malloc(strlen(rcv_message) - pos + 1);
+		parce_data(rcv_message,'|',&pos,aux_list);
+		aux_list_size = strlen(aux_list);
+		while(posaux < aux_list_size){
+			parce_data(rcv_message,',',&posaux,aux);
+			printf("tenemos alias -%s-\n",aux);
+			fprintf(fd,"	ServerAlias %s\n",aux);
 		}
-	} while(buffer_rx[0] =='1');
-	// Indicamos que hemos recibido el fin d e los datos
-	send(fd_client,"1",BUFFER_SIZE,0);
-
-	fprintf(fd,"	CustomLog /websites/%s/%s/logs/access.log combined\n",
-	dir,site_name);
-	fprintf(fd,"	ErrorLog /websites/%s/%s/logs/error.log\n",
-	dir,site_name);
-	fprintf(fd,"");
-	fprintf(fd,"</VirtualHost>\n");
-	fclose(fd);
-
-	return 1;
+	
+		printf("Preparamos los indices\n");
+		aux_list = (char *)malloc(strlen(rcv_message) - pos + 1);
+		parce_data(rcv_message,'|',&pos,aux_list);
+		aux_list_size = strlen(aux_list);
+		while(posaux<aux_list_size){
+			parce_data(rcv_message,',',&posaux,aux);
+			printf("tenemos index -%s-\n",aux);
+			fprintf(fd,"	DirectoryIndex %s\n",aux);
+		}
+		
+		fprintf(fd,"	CustomLog /websites/%s/%s/logs/access.log combined\n",
+		dir,site_name);
+		fprintf(fd,"	ErrorLog /websites/%s/%s/logs/error.log\n",
+		dir,site_name);
+		fprintf(fd,"");
+		fprintf(fd,"</VirtualHost>\n");
+		fclose(fd);
+		
+		sprintf(*send_message,"1");
+	} else {
+		sprintf(*send_message,"0");
+	}
 }
 
-int purge(int fd_client){
+void purge(char **send_message, int *send_message_size){
 	/* Elimina todos los archivos de virtual host de los sitios */
 	
 	FILE *fp;
 	char aux[5];
 
+	*send_message_size=2;
+	*send_message=(char *)realloc(*send_message,*send_message_size);
 	fp = popen("rm -f /etc/httpd/sites.d/*.conf 2>/dev/null; echo $?", "r");
 	if (fp == NULL) {
 		printf("Failed to run command\n" );
-		return 0;
+		sprintf(*send_message,"0");
 	}
 	fgets(aux, sizeof(aux)-1, fp);
 	pclose(fp);
-	send(fd_client,"1\0",BUFFER_SIZE,0);
-	return 1;
+	sprintf(*send_message,"1");
+
 }
 
-int get_sites(int fd_client){
+void get_sites(char **send_message, uint32_t *send_message_size){
 	/* Retorna un listado de los id de los sitios que posee
 	   cargados. El primer dato es un indicador de si a continuacion
 	   se enviaran mas datos. 1 por Si, 0 por no. */
 
 	FILE *fp;
-	char buffer_tx[BUFFER_SIZE];
 	char aux[50];
+	uint32_t total_size;
 	char site_id_char[5]; //el 5to es el '\0'
 	unsigned long site_id;
 
@@ -166,57 +261,45 @@ int get_sites(int fd_client){
 	fp = popen("cat /etc/httpd/sites.d/*.conf 2>/dev/null | grep ID | awk '{print $2}'", "r");
 	if (fp == NULL) {
 		printf("Failed to run command\n" );
-		send(fd_client,"0\0",BUFFER_SIZE,0);
-		return 0;
-	}
-	// Suponemos que vamos a necesitar una sola transmicion
-	strcpy(buffer_tx,"1|0|");
-	while (fgets(aux, sizeof(aux)-1, fp) != NULL){
-		/* El ultimo caracter es un enter. Debemos eliminarlo */
-		printf("largo %i\n",strlen(aux));
-		aux[strlen(aux)-1] = '\0';
-		printf("Dato a armar -%s-\n",aux);
-		/* Si last_site_id es distinto de 0 entonces debemos
- 		 * avanzar hasta encontrar donde nos quedamos */
-		if(strlen(buffer_tx)+strlen(aux)+2 >= BUFFER_SIZE){
-			/* Enviamos lo que tenemos de momento. Como quedan datos
- 			 * atualizamos el char al inicio */
-			buffer_tx[2] = '1';
-			printf("Estamos en while enviando -%s-\n",buffer_tx);
-			send(fd_client,buffer_tx,BUFFER_SIZE,0);
-			/* Quedamos essperando que el controller acepte mas datos */
-			recv(fd_client,buffer_tx,BUFFER_SIZE,0);
-			if(buffer_tx[0] == 1){
-				/* El controller acepta mas datos */
-				strcpy(buffer_tx,"1|0|");
-			} else {
-				/* Por algun motivo el controller no acepta mas datos */
-				return 0;
+		*send_message_size = 2;
+		*send_message=(char *)realloc(*send_message,*send_message_size);
+		sprintf(*send_message,"0");
+	} else {
+		*send_message_size = 100;
+		*send_message=(char *)realloc(*send_message,*send_message_size);
+		strcpy(*send_message,"1");
+		total_size = 1;
+		while (fgets(aux, sizeof(aux)-1, fp) != NULL){
+			if(*send_message_size < strlen(aux) + total_size + 1){
+				*send_message_size += 100;
+				*send_message=(char *)realloc(*send_message,*send_message_size);
 			}
-		} else {
-			/* Seguimos metiendo datos en buffer_tx */
-			printf("Agregamos al final del buffer_Tx\n");
-			strcat(buffer_tx,aux);strcat(buffer_tx,"|");
+			aux[strlen(aux)-1] = '\0';	//Quita el enter al final de la linea
+			strcat(*send_message,aux);
+			strcat(*send_message,"|");
+			total_size += strlen(aux) + 1;	//El +1 es por el '|'
 		}
+		pclose(fp);
+		*send_message_size = total_size + 1;
+		printf("*send_message = %s\n",*send_message);
+		printf("*send_message_size = %i\n",*send_message_size);
+
+		*send_message=(char *)realloc(*send_message,*send_message_size);
 	}
-	/* Quedaron datos remanentes. Cambiamos el primer char a 0.
- 	 * para indicar que no hay mas datos */
-	printf("Estamos fin enviando -%s-\n",buffer_tx);
-	send(fd_client,buffer_tx,BUFFER_SIZE,0);
-	pclose(fp);
-	return 1;
 }
 
 void del_site(){
 	/* Elimina la configuracion de un sitio */
 }
 
-int check(char *detalle){
+void check(char **send_message, uint32_t *send_message_size){
 	/* Retorna si un worker esta en condiciones de
 	   estar online y tambien estadisticas del mismo */
 	FILE *fp;
-	char buffer[100];
-	int status = 1;
+	char status = '1';
+	char detalle[300];
+	char buffer[200];
+	char aux[200];
 
 	/* Verificar que este montado via NFS el filer */
 	/* Verificar que el httpd este corriendo */
@@ -225,22 +308,18 @@ int check(char *detalle){
 	if (fp == NULL) {
 		printf("Fallo al obtener el estado del apache\n" );
 		strcpy(detalle,"No se pudo determinar si el proceso httpd esta corriendo|");
-		status = 0;
+		status = '0';
 	}
 	fgets(buffer, sizeof(buffer)-1, fp);
 	pclose(fp);
 
 	if(buffer[0] != '0'){
 		strcpy(detalle,"httpd caido");
-		status = 0;
+		status = '0';
 	}
-	return status;
-}
-
-void statistics(char *aux){
-	/* Obtiene estadisticas del worker */
-	FILE *fp;
-	char buffer[100];
+	*send_message_size = strlen(detalle) + 3; //el 3 incluye el estado , el "|" y el \0
+	*send_message=(char *)realloc(*send_message,*send_message_size);
+	sprintf(*send_message,"%c%s|",status,detalle);
 
 	/* Para la CPU */
 	fp = popen("uptime | awk '{print \"|\"$10\"|\"$11\"|\"$12\"|\"}' | sed 's\\,\\\\g'", "r");
@@ -269,6 +348,10 @@ void statistics(char *aux){
 	strcat(aux,buffer);
 	aux[strlen(aux) - 1] = '\0';
 	pclose(fp);
+
+	*send_message_size += strlen(aux);
+	*send_message=(char *)realloc(*send_message,*send_message_size);
+	strcat(*send_message,aux);
 }
 
 int repare(){
@@ -288,17 +371,15 @@ int main(int argc , char *argv[]){
 	int cant_bytes;
 	struct sockaddr_in server;
 	struct sockaddr_in client;
-	char buffer_rx[BUFFER_SIZE];
-	char buffer_tx[BUFFER_SIZE];
-	unsigned int last_site_id;
-	char aux[200];
+	char *rcv_message=NULL;
+	int rcv_message_size;
+	char *send_message=NULL;
+	int send_message_size;
 	char action;
-	int result;
-	int pos;
-	struct timeval tv;
+	struct config c;
 	
-	tv.tv_sec = 3;
-	tv.tv_usec = 0;
+	//tv.tv_sec = 3;
+	//tv.tv_usec = 0;
 
 	if ((fd_server=socket(AF_INET, SOCK_STREAM, 0)) == -1 ) {  
 		printf("error en socket()\n");
@@ -307,8 +388,6 @@ int main(int argc , char *argv[]){
 	server.sin_family = AF_INET;
 	server.sin_port = htons(PORT);
 	server.sin_addr.s_addr = INADDR_ANY;
-	//bzero(&(server.sin_zero),8);
-	//setsockopt(fd_server, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
 	if(bind(fd_server,(struct sockaddr*)&server, sizeof(struct sockaddr))<0) {
 		printf("error en bind() \n");
@@ -328,82 +407,53 @@ int main(int argc , char *argv[]){
 			return 1;
 		}
 
-		// Aguardamos continuamente que el cliente envie un comando
-		clear_buffer(buffer_rx);
-		while(recv(fd_client,buffer_rx,BUFFER_SIZE,0)>0){
-			printf("Recibimos -%s-\n",buffer_rx);
+		while(recv_all_message(fd_client,&rcv_message,&rcv_message_size)){
+			printf("Recibimos -%s-\n",rcv_message);
 			/* Obtenemos la accion a realizar */
-			action = buffer_rx[0];
+			action = rcv_message[0];
 			switch(action){
 				case 'A':
 					printf("Agregamos sitio\n");
-					add_site(buffer_rx,fd_client);
+					add_site(rcv_message,&send_message,&send_message_size,&c);
 					break;
 				case 'd':
 					printf("Eliminamos sitio\n");
-					delete_site(buffer_rx,fd_client);
+					delete_site(rcv_message,&send_message,&send_message_size);
 					break;
 				case 'G':
-					get_sites(fd_client);
+					get_sites(&send_message,&send_message_size);
 					break;
 				case 'D':
 					printf("Implementar\n");
 					break;
 				case 'P':
 					printf("Eliminamos configuracion del apache\n");
-					purge(fd_client);
+					purge(&send_message,&send_message_size);
 					break;
 				case 'C':
 					printf("Chequeamos el worker\n");
-					if(check(aux) == 1){
-						buffer_tx[0] = '1';
-					} else {
-						buffer_tx[0] = '0';
-					}
-					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
-					strcat(buffer_tx,aux);
-					statistics(aux);
-					strcat(buffer_tx,aux);
-					
-					printf("Esperando que el cliente reciba los datos\n");
-					cant_bytes = send(fd_client,buffer_tx, BUFFER_SIZE,0);
-					printf("Enviamos(%i) -%s-\n",cant_bytes,buffer_tx);
+					check(&send_message,&send_message_size);
 					break;
 				case 'S':
 					/* Start apache */
-					if(httpd_systemctl(0) == 0){
-						buffer_tx[0] = 1;
-					} else {
-						buffer_tx[0] = 0;
-					}
-					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
-					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					httpd_systemctl(0,&send_message,&send_message_size);
 					break;
 				case 'K':
 					/* Stop apache */
-					if(httpd_systemctl(1) == 0){
-						buffer_tx[0] = 1;
-					} else {
-						buffer_tx[0] = 0;
-					}
-					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
-					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					httpd_systemctl(1,&send_message,&send_message_size);
 					break;
 				case 'R':
 					/* Reload apache */
-					if(httpd_systemctl(2) == 0){
-						buffer_tx[0] = 1;
-					} else {
-						buffer_tx[0] = 0;
-					}
-					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
-					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					httpd_systemctl(2,&send_message,&send_message_size);
 					break;
 				default :
 					printf("Error protocolo\n");
-					send(fd_client,"0\0",BUFFER_SIZE,0);
+					send_message_size=2;
+					send_message = (char *)realloc(send_message,send_message_size);
+					sprintf(send_message,"0");
 			}
-			printf("Volvemos a esperar un mensaje\n");
+			printf("AAAAAA %i-%s\n",send_message_size,send_message);
+			send_all_message(fd_client,send_message,send_message_size);
 		}
 		close(fd_client);
 	}
