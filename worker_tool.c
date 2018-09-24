@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/types.h>
+#include "send_receive.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "parce.h"
@@ -23,79 +24,6 @@ struct config{
  *	FUNCIONES		*
  ********************************/
 
-void int_to_4bytes(uint32_t *i, char *_4bytes){
-	memcpy(_4bytes,i,4);
-}
-
-void _4bytes_to_int(char *_4bytes, uint32_t *i){
-	memcpy(i,_4bytes,4);
-}
-
-int recv_all_message(int fd_client, char **rcv_message, uint32_t *rcv_message_size){
-	/* Coordina la recepcion de mensajes grandes del cliente */
-	/* El encabezado es de 1 char */
-	char buffer[ROLE_BUFFER_SIZE];
-	char printB[ROLE_BUFFER_SIZE+1];
-	int first_message=1;
-	uint32_t parce_size;
-	int c=0;	// Cantidad de bytes recibidos
-
-	// Al menos una vez vamos a ingresar
-	*rcv_message_size=0;
-	 do{
-		printf("Esperamos nuevo mensaje\n");
-		if(recv(fd_client,buffer,ROLE_BUFFER_SIZE,0)<=0){
-			return 0;
-		}
-		if(first_message){
-			first_message=0;
-			_4bytes_to_int(buffer,rcv_message_size);
-			*rcv_message=(char *)realloc(*rcv_message,*rcv_message_size);
-		}
-		_4bytes_to_int(&(buffer[4]),&parce_size);
-		memcpy(*rcv_message+c,&(buffer[ROLE_HEADER_SIZE]),parce_size);
-		c += parce_size;
-	} while(c < *rcv_message_size);
-	printf("RECV Mesanje: %s\n",*rcv_message);
-	return 1;
-}
-
-int send_all_message(int fd_client, char *send_message, uint32_t send_message_size){
-	/* Coordina el envio de los datos aun cuando se necesita
-	 * mas de una transmision */
-
-	char buffer[ROLE_BUFFER_SIZE];
-	char printB[ROLE_BUFFER_SIZE+1];
-	int c=0;	//Cantidad byes enviados
-	uint32_t parce_size;
-
-	printf("Enviaremos al CORE: %i,%s\n",send_message_size, send_message);
-
-	if( send_message[send_message_size-1] != '\0'){
-		printf("cloud_send_receive: ERROR. send_message no termina en \\0\n");
-		return 0;
-	}
-	/* Los 4 primeros bytes del header es el tamano total del mensaje */
-	int_to_4bytes(&send_message_size,buffer);
-
-	while(c < send_message_size){
-		if(send_message_size - c + ROLE_HEADER_SIZE < ROLE_BUFFER_SIZE){
-			/* Entra en un solo buffer */
-			parce_size = send_message_size - c ;
-		} else {
-			/* No entra todo en el buffer */
-			parce_size = ROLE_BUFFER_SIZE - ROLE_HEADER_SIZE;
-		}
-		int_to_4bytes(&parce_size,&(buffer[4]));
-		memcpy(buffer + ROLE_HEADER_SIZE,send_message + c,parce_size);
-		c += parce_size;
-		if(send(fd_client,buffer,ROLE_BUFFER_SIZE,0)<0){
-			printf("ERROR a manejar\n");
-			return 0;
-		}
-	}
-}
-
 httpd_systemctl(int action, char **send_message, uint32_t *send_message_size){	//0 stop, 1 start, 2 reload
 	FILE *fp;
 	char status[2];
@@ -116,8 +44,8 @@ httpd_systemctl(int action, char **send_message, uint32_t *send_message_size){	/
 			strcpy(*send_message,"0");
 	}
 	fgets(status, sizeof(status)-1, fp);
-	sprintf(*send_message,"%s",status);
 	pclose(fp);
+	strcpy(*send_message,"1");
 }
 
 void delete_site(char *rcv_message, char **send_message, uint32_t *send_message_size){
@@ -138,10 +66,7 @@ void delete_site(char *rcv_message, char **send_message, uint32_t *send_message_
 	*send_message_size = 2;
 	*send_message = (char *)realloc(*send_message,*send_message_size);
 	
-	if(status[0] == '0')
-		sprintf(*send_message,"1");
-	else
-		sprintf(*send_message,"0");
+	sprintf(*send_message,"1");
 }
 
 //int add_site(char *buffer_rx, int fd_client){
@@ -157,15 +82,20 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 	char aux[200];
 	char *aux_list = NULL;
 	int aux_list_size;
-	int pos = 2;
+	int pos = 1;
 	int posaux;
 	FILE *fd;
 	char site_path[100];
 
+	printf("paso 1:%s\n",rcv_message);
 	parce_data(rcv_message,'|',&pos,site_id);
+	printf("paso 2\n");
 	parce_data(rcv_message,'|',&pos,site_name);
+	printf("paso 3\n");
 	parce_data(rcv_message,'|',&pos,dir);
+	printf("paso 4\n");
 	parce_data(rcv_message,'|',&pos,site_ver);
+	printf("paso 5\n");
 
 	printf("Datos del sitio a ser agregado:\n");
 	printf("	site_id:	%s\n",site_id);
@@ -196,8 +126,10 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 		aux_list = (char *)malloc(strlen(rcv_message) - pos + 1);
 		parce_data(rcv_message,'|',&pos,aux_list);
 		aux_list_size = strlen(aux_list);
+		printf("Tenemos alias para agregar: %s\n",aux_list);
+		posaux=0;
 		while(posaux < aux_list_size){
-			parce_data(rcv_message,',',&posaux,aux);
+			parce_data(aux_list,',',&posaux,aux);
 			printf("tenemos alias -%s-\n",aux);
 			fprintf(fd,"	ServerAlias %s\n",aux);
 		}
@@ -206,8 +138,9 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 		aux_list = (char *)malloc(strlen(rcv_message) - pos + 1);
 		parce_data(rcv_message,'|',&pos,aux_list);
 		aux_list_size = strlen(aux_list);
+		posaux=0;
 		while(posaux<aux_list_size){
-			parce_data(rcv_message,',',&posaux,aux);
+			parce_data(aux_list,',',&posaux,aux);
 			printf("tenemos index -%s-\n",aux);
 			fprintf(fd,"	DirectoryIndex %s\n",aux);
 		}
@@ -288,10 +221,6 @@ void get_sites(char **send_message, uint32_t *send_message_size){
 	}
 }
 
-void del_site(){
-	/* Elimina la configuracion de un sitio */
-}
-
 void check(char **send_message, uint32_t *send_message_size){
 	/* Retorna si un worker esta en condiciones de
 	   estar online y tambien estadisticas del mismo */
@@ -322,7 +251,7 @@ void check(char **send_message, uint32_t *send_message_size){
 	sprintf(*send_message,"%c%s|",status,detalle);
 
 	/* Para la CPU */
-	fp = popen("uptime | awk '{print \"|\"$10\"|\"$11\"|\"$12\"|\"}' | sed 's\\,\\\\g'", "r");
+	fp = popen("uptime | awk '{print $10\"|\"$11\"|\"$12\"|\"}' | sed 's\\,\\\\g'", "r");
 	fgets(buffer, sizeof(buffer)-1, fp);
 	strcpy(aux,buffer);
 	aux[strlen(aux) - 1] = '\0';
@@ -378,8 +307,9 @@ int main(int argc , char *argv[]){
 	char action;
 	struct config c;
 	
-	//tv.tv_sec = 3;
-	//tv.tv_usec = 0;
+	/* Par ael futuro debe o bien leerlo de un archivo o
+ 	 * bien recibir la configuracion del controller*/
+	strcpy(c.default_domain,"fibercorp.com.ar");
 
 	if ((fd_server=socket(AF_INET, SOCK_STREAM, 0)) == -1 ) {  
 		printf("error en socket()\n");
@@ -452,7 +382,7 @@ int main(int argc , char *argv[]){
 					send_message = (char *)realloc(send_message,send_message_size);
 					sprintf(send_message,"0");
 			}
-			printf("AAAAAA %i-%s\n",send_message_size,send_message);
+			printf("ENVIANDO bytes:%i mensaje:%s\n",send_message_size,send_message);
 			send_all_message(fd_client,send_message,send_message_size);
 		}
 		close(fd_client);
