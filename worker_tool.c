@@ -48,7 +48,7 @@ httpd_systemctl(int action, char **send_message, uint32_t *send_message_size){	/
 	strcpy(*send_message,"1");
 }
 
-void delete_site(char *rcv_message, char **send_message, uint32_t *send_message_size){
+void del_site(char *rcv_message, char **send_message, uint32_t *send_message_size){
 	char command[200];
 	char site_name[100];
 	char status[2];
@@ -57,26 +57,29 @@ void delete_site(char *rcv_message, char **send_message, uint32_t *send_message_
 
 	parce_data(rcv_message,'|',&pos,site_name);
 
-	sprintf(command,"rm /etc/httpd/sites.d/%s.conf 2>/dev/null; echo $?",site_name);
-	printf("Ejecutando comando: %s\n",command);
-	fp = popen(command, "r");
-	fgets(status, sizeof(status)-1, fp);
-	pclose(fp);
-
 	*send_message_size = 2;
 	*send_message = (char *)realloc(*send_message,*send_message_size);
-	
-	sprintf(*send_message,"1");
+
+	sprintf(command,"rm /etc/httpd/sites.d/%s.conf 2>/dev/null; echo $?",site_name);
+	printf("Ejecutando comando: %s\n",command);
+	if(fp = popen(command, "r")){
+		fgets(status, sizeof(status)-1, fp);
+		pclose(fp);
+		sprintf(*send_message,"1");
+	} else {
+		sprintf(*send_message,"0");
+	}
 }
 
-//int add_site(char *buffer_rx, int fd_client){
 void add_site(char *rcv_message, char **send_message, uint32_t *send_message_size,
 	      struct config *c){
 	/* Agrega el archivo de configuracion de un sitio
-	   al directorio /etc/httpd/sites.d */
+	   al directorio /etc/httpd/sites.d. Si el archivo ya existe lo pisa.
+	   Por lo tanto add_site fuciona tanto apra alta como para modificacion */
 
 	char site_id[20];	//El 5to es el '\0'
 	char site_ver[20];	//El 3ro es el '\0'
+	char status[2];	//0 = OFFLINE, 1 = ONLINE
 	char site_name[100];
 	char dir[10];
 	char aux[200];
@@ -96,11 +99,14 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 	printf("paso 4\n");
 	parce_data(rcv_message,'|',&pos,site_ver);
 	printf("paso 5\n");
+	parce_data(rcv_message,'|',&pos,status);
+	printf("paso 5\n");
 
 	printf("Datos del sitio a ser agregado:\n");
 	printf("	site_id:	%s\n",site_id);
 	printf("	site_ver	%s\n",site_ver);
 	printf("	site_name:	%s\n",site_name);
+	printf("	site_status:	%s\n",status);
 
 	// Comenzamos a armar el archivo del vhost
 	strcpy(site_path,VHOSTDIR);
@@ -110,16 +116,24 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 	*send_message_size = 2;
 	*send_message = (char *)realloc(*send_message,*send_message_size);
 
+	printf("Preparamos el archivo\n");
 	if(fd = fopen(site_path,"w")){
 		fprintf(fd,"#ID %s\n",site_id);
 		fprintf(fd,"#VER %s\n",site_ver);
-		fprintf(fd,"<Directory /websites/%s/%s/wwwroot>\n",dir,site_name);
+		if(status[0] = '1')
+			fprintf(fd,"<Directory /websites/%s/%s/wwwroot>\n",dir,site_name);
+		else
+			fprintf(fd,"<Directory /websites/defaults/offline>\n",dir,site_name);
 		fprintf(fd,"	AllowOverride All\n");
 		fprintf(fd,"	Require all granted\n");
 		fprintf(fd,"</Directory>\n");
 		fprintf(fd,"<VirtualHost *:80>\n");
-		fprintf(fd,"	DocumentRoot /websites/%s/%s/wwwroot\n",
-		dir,site_name);
+		printf("Paso\n");
+		if(status[0] = '1')
+			fprintf(fd,"	DocumentRoot /websites/%s/%s/wwwroot\n");
+		else
+			fprintf(fd,"	DocumentRoot /websites/defaults/offline\n",
+			dir,site_name);
 		fprintf(fd,"	ServerName %s.%s\n",site_name,c->default_domain);
 	
 		printf("Preparado para los alias\n");
@@ -343,14 +357,15 @@ int main(int argc , char *argv[]){
 			action = rcv_message[0];
 			switch(action){
 				case 'A':
-					printf("Agregamos sitio\n");
+					printf("Agregamos o actualizamos sitio\n");
 					add_site(rcv_message,&send_message,&send_message_size,&c);
 					break;
 				case 'd':
 					printf("Eliminamos sitio\n");
-					delete_site(rcv_message,&send_message,&send_message_size);
+					del_site(rcv_message,&send_message,&send_message_size);
 					break;
 				case 'G':
+					printf("Listar sitios\n");
 					get_sites(&send_message,&send_message_size);
 					break;
 				case 'D':
