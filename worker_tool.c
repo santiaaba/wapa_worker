@@ -106,6 +106,7 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 	printf("	site_id:	%s\n",site_id);
 	printf("	site_ver	%s\n",site_ver);
 	printf("	site_name:	%s\n",site_name);
+	printf("	hash:		%s\n",dir);
 	printf("	site_status:	%s\n",status);
 
 	// Comenzamos a armar el archivo del vhost
@@ -123,17 +124,16 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 		if(status[0] = '1')
 			fprintf(fd,"<Directory /websites/%s/%s/wwwroot>\n",dir,site_name);
 		else
-			fprintf(fd,"<Directory /websites/defaults/offline>\n",dir,site_name);
+			fprintf(fd,"<Directory /websites/defaults/offline>\n");
 		fprintf(fd,"	AllowOverride All\n");
 		fprintf(fd,"	Require all granted\n");
 		fprintf(fd,"</Directory>\n");
 		fprintf(fd,"<VirtualHost *:80>\n");
 		printf("Paso\n");
 		if(status[0] = '1')
-			fprintf(fd,"	DocumentRoot /websites/%s/%s/wwwroot\n");
+			fprintf(fd,"	DocumentRoot /websites/%s/%s/wwwroot\n",dir,site_name);
 		else
-			fprintf(fd,"	DocumentRoot /websites/defaults/offline\n",
-			dir,site_name);
+			fprintf(fd,"	DocumentRoot /websites/defaults/offline\n");
 		fprintf(fd,"	ServerName %s.%s\n",site_name,c->default_domain);
 	
 		printf("Preparado para los alias\n");
