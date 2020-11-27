@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <sys/types.h>
 #include "send_receive.h"
+#include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "parce.h"
@@ -49,6 +50,7 @@ httpd_systemctl(int action, char **send_message, uint32_t *send_message_size){	/
 }
 
 void del_site(char *rcv_message, char **send_message, uint32_t *send_message_size){
+	/* Eliminamos un sitio de la configuracion del apache */
 	char command[200];
 	char site_name[100];
 	char status[2];
@@ -81,7 +83,7 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 	char site_ver[20];	//El 3ro es el '\0'
 	char status[2];	//0 = OFFLINE, 1 = ONLINE
 	char site_name[100];
-	char dir[10];
+	char dir[50];
 	char aux[200];
 	char *aux_list = NULL;
 	int aux_list_size;
@@ -122,7 +124,7 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 		fprintf(fd,"#ID %s\n",site_id);
 		fprintf(fd,"#VER %s\n",site_ver);
 		if(status[0] = '1')
-			fprintf(fd,"<Directory /websites/%s/%s/wwwroot>\n",dir,site_name);
+			fprintf(fd,"<Directory /websites/%s/wwwroot>\n",dir);
 		else
 			fprintf(fd,"<Directory /websites/defaults/offline>\n");
 		fprintf(fd,"	AllowOverride All\n");
@@ -131,7 +133,7 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 		fprintf(fd,"<VirtualHost *:80>\n");
 		printf("Paso\n");
 		if(status[0] = '1')
-			fprintf(fd,"	DocumentRoot /websites/%s/%s/wwwroot\n",dir,site_name);
+			fprintf(fd,"	DocumentRoot /websites/%s/wwwroot\n",dir);
 		else
 			fprintf(fd,"	DocumentRoot /websites/defaults/offline\n");
 		fprintf(fd,"	ServerName %s.%s\n",site_name,c->default_domain);
@@ -159,10 +161,10 @@ void add_site(char *rcv_message, char **send_message, uint32_t *send_message_siz
 			fprintf(fd,"	DirectoryIndex %s\n",aux);
 		}
 		
-		fprintf(fd,"	CustomLog /websites/%s/%s/logs/access.log combined\n",
-		dir,site_name);
-		fprintf(fd,"	ErrorLog /websites/%s/%s/logs/error.log\n",
-		dir,site_name);
+		fprintf(fd,"	CustomLog /websites/%s/logs/access.log combined\n",
+		dir);
+		fprintf(fd,"	ErrorLog /websites/%s/logs/error.log\n",
+		dir);
 		fprintf(fd,"");
 		fprintf(fd,"</VirtualHost>\n");
 		fclose(fd);
@@ -300,6 +302,11 @@ void check(char **send_message, uint32_t *send_message_size){
 int repare(){
 	/* intenta reparar el worker */
 	/* retorna 1 si tuvo exito. 0 en caso contrario */
+
+	/* Verificando punto de montaje */
+	/* Verificando apache e instalandolo */
+	/* Verificando mono */
+
 	return 1;
 }
 
@@ -320,11 +327,34 @@ int main(int argc , char *argv[]){
 	int send_message_size;
 	char action;
 	struct config c;
-	
-	/* Par ael futuro debe o bien leerlo de un archivo o
+	FILE *fp = NULL;
+	pid_t process_id = 0;
+	pid_t sid = 0;
+
+	//Creamos un proceso hijo
+	process_id = fork();
+	if(process_id < 0){
+		printf("fork failed!\n");
+		exit(1);
+	}
+	if(process_id > 0){
+		printf("process_id of child process %d \n", process_id);
+		// return success in exit status
+		exit(0);
+	}
+	sid = setsid();
+	if(sid < 0) {
+		exit(1);
+	}
+	//close(STDIN_FILENO);
+	//close(STDOUT_FILENO);
+	//close(STDERR_FILENO);
+
+	/* Par el futuro debe o bien leerlo de un archivo o
  	 * bien recibir la configuracion del controller*/
 	strcpy(c.default_domain,"fibercorp.com.ar");
 
+	
 	if ((fd_server=socket(AF_INET, SOCK_STREAM, 0)) == -1 ) {  
 		printf("error en socket()\n");
 		return 1;
@@ -357,25 +387,31 @@ int main(int argc , char *argv[]){
 			action = rcv_message[0];
 			switch(action){
 				case 'A':
+					/* Agregar sitio */
 					printf("Agregamos o actualizamos sitio\n");
 					add_site(rcv_message,&send_message,&send_message_size,&c);
 					break;
 				case 'd':
+					/* Eliminar sitio */
 					printf("Eliminamos sitio\n");
 					del_site(rcv_message,&send_message,&send_message_size);
 					break;
 				case 'G':
+					/* listar sitios existentes en el worker */
 					printf("Listar sitios\n");
 					get_sites(&send_message,&send_message_size);
 					break;
 				case 'D':
+					/* ?????? */
 					printf("Implementar\n");
 					break;
 				case 'P':
+					/* Eliminar configuracion toda del apache */
 					printf("Eliminamos configuracion del apache\n");
 					purge(&send_message,&send_message_size);
 					break;
 				case 'C':
+					/* Chequeo del worker */
 					printf("Chequeamos el worker\n");
 					check(&send_message,&send_message_size);
 					break;
@@ -392,6 +428,7 @@ int main(int argc , char *argv[]){
 					httpd_systemctl(2,&send_message,&send_message_size);
 					break;
 				default :
+					/* Opcion invalida */
 					printf("Error protocolo\n");
 					send_message_size=2;
 					send_message = (char *)realloc(send_message,send_message_size);
